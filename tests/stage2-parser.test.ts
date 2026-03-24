@@ -123,4 +123,58 @@ describe("정밀화: 선택자 품질 우선 선택", () => {
     expect(parsed).not.toBeNull();
     expect(parsed?.parserMeta.contentSelectorUsed).toBe("main");
   });
+
+  it("플랫폼 선택자 실패 시 글로벌 fallback으로 파싱 성공", () => {
+    const html = `
+      <html><head><title>fallback test</title></head>
+      <body>
+        <section>
+          <h1>제목</h1>
+          <p>이 문서는 플랫폼 전용 선택자가 없는 경우를 가정합니다. 충분한 본문 텍스트를 포함해 fallback 파싱을 검증합니다.</p>
+          <p>두 번째 문단입니다. 두 번째 문단입니다. 두 번째 문단입니다.</p>
+        </section>
+      </body></html>
+    `;
+    const parsed = parseBlogHtml("naver", html);
+    expect(parsed).not.toBeNull();
+    expect(parsed?.parserMeta.contentSelectorUsed.startsWith("fallback:")).toBe(true);
+  });
+});
+
+describe("정밀화: 네이버 iframe 본문 추적", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("mainFrame src를 따라가 본문 파싱에 성공", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const href = input.toString();
+        if (href.includes("PostView.naver")) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              `<html><head><title>frame</title></head><body><div class="se-main-container"><h1>제목</h1><p>프레임 본문 텍스트입니다. 프레임 본문 텍스트입니다. 프레임 본문 텍스트입니다.</p></div></body></html>`,
+          };
+        }
+        return {
+          ok: true,
+          status: 200,
+          text: async () =>
+            `<html><head><title>outer</title></head><body><iframe id="mainFrame" src="/PostView.naver?blogId=abc&logNo=1"></iframe></body></html>`,
+        };
+      }),
+    );
+
+    const result = await analyzeRequest({
+      platform: "naver",
+      url: "https://blog.naver.com/abc/1",
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.response.error).toBeNull();
+    expect(result.response.data?.parsed.bodyText.length).toBeGreaterThan(20);
+  });
 });

@@ -8,9 +8,28 @@ import { runRulesEngine } from "@/lib/rulesEngine";
 import type { AnalyzeRequest, AnalyzeResponseEnvelope } from "@/lib/types";
 import { validateAnalyzeInput } from "@/lib/urlValidation";
 import { detectYmyl } from "@/lib/ymyl";
+import * as cheerio from "cheerio";
+
+type AnalyzeProgressStage = "validate" | "fetch" | "parse" | "rules" | "ai";
+
+async function resolveNaverIframeHtml(normalizedUrl: string, html: string): Promise<string> {
+  const $ = cheerio.load(html);
+  const iframeSrc = $("iframe#mainFrame").attr("src");
+  if (!iframeSrc) return html;
+
+  const frameUrl = new URL(iframeSrc, normalizedUrl).toString();
+  try {
+    const frameHtml = await fetchHtml(frameUrl);
+    if (frameHtml && frameHtml.trim().length > 0) return frameHtml;
+  } catch {
+    // fallback to original html when frame fetch fails
+  }
+  return html;
+}
 
 export async function analyzeRequest(
   body: AnalyzeRequest | null,
+  options?: { onProgress?: (stage: AnalyzeProgressStage) => void },
 ): Promise<{ status: number; response: AnalyzeResponseEnvelope }> {
   const requestId = randomUUID();
   const timestamp = new Date().toISOString();
@@ -42,10 +61,15 @@ export async function analyzeRequest(
       },
     };
   }
+  options?.onProgress?.("validate");
 
   let html: string;
   try {
+    options?.onProgress?.("fetch");
     html = await fetchHtml(validation.data.normalizedUrl);
+    if (validation.data.platform === "naver") {
+      html = await resolveNaverIframeHtml(validation.data.normalizedUrl, html);
+    }
   } catch {
     return {
       status: 503,
@@ -76,7 +100,9 @@ export async function analyzeRequest(
       },
     };
   }
+  options?.onProgress?.("parse");
   const ruleResult = runRulesEngine(parsed);
+  options?.onProgress?.("rules");
   const partialErrors: NonNullable<AnalyzeResponseEnvelope["partialErrors"]> = [];
   let webVitals:
     | {
@@ -154,6 +180,7 @@ export async function analyzeRequest(
   const allRuleItems = [...ruleResult.seo.items, ...ruleResult.aeo.items, ...ruleResult.geo.items];
 
   const forceGeminiFail = body.url.includes("__forceGeminiFail=1");
+  options?.onProgress?.("ai");
   let aiInsights = await (async () => {
     if (forceGeminiFail || !process.env.GEMINI_API_KEY) {
       return {

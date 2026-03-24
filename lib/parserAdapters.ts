@@ -34,9 +34,24 @@ export interface ParseResult {
 }
 
 const SELECTOR_MAP: Record<Platform, string[]> = {
-  naver: ["div.se-main-container", "div#postViewArea", "article", "div[id*='post']"],
-  tistory: ["div.tt_article_useless_p_margin", "div.entry-content", "article", "div#content"],
-  blogspot: ["div.post-body", "article.post", "div.post", "main"],
+  naver: [
+    "div.se-main-container",
+    "div#postViewArea",
+    "div#postArea",
+    "div.post_ct",
+    "article",
+    "div[id*='post']",
+    "div[id*='content']",
+  ],
+  tistory: [
+    "div.tt_article_useless_p_margin",
+    "div.entry-content",
+    "div.article-view",
+    "article",
+    "div#content",
+    "div[id*='content']",
+  ],
+  blogspot: ["div.post-body", "article.post", "div.post", "main", "article", "div[id*='post']"],
 };
 
 const PARSER_VERSION: Record<Platform, string> = {
@@ -71,6 +86,27 @@ function extractBySelectors($: cheerio.CheerioAPI, selectors: string[]): ParseSe
   return best;
 }
 
+function extractByGlobalFallback($: cheerio.CheerioAPI): ParseSelectorResult | null {
+  const candidates = ["article", "main", "div[id*='content']", "div[id*='post']", "section", "body"];
+  const minTextLength = 80;
+  let best: ParseSelectorResult | null = null;
+
+  for (const selector of candidates) {
+    const node = $(selector).first().clone();
+    if (node.length === 0) continue;
+    const beforeLinkCount = node.find("a").length;
+    const beforeBlockCount = node.find("p,li,h1,h2,h3").length;
+    node.find("script,style,noscript,iframe,nav,aside,footer,.comment,.ads,.widget,.share,header").remove();
+    const text = cleanText(node.text());
+    if (text.length < minTextLength) continue;
+    const score = text.length + beforeBlockCount * 30 - beforeLinkCount * 20;
+    const candidate: ParseSelectorResult = { selector: `fallback:${selector}`, depth: 99, text, score };
+    if (!best || candidate.score > best.score) best = candidate;
+  }
+
+  return best;
+}
+
 export function parseBlogHtml(platform: Platform, html: string): ParseResult | null {
   const $ = cheerio.load(html);
   const title = cleanText($("title").first().text());
@@ -81,7 +117,7 @@ export function parseBlogHtml(platform: Platform, html: string): ParseResult | n
 
   let noiseBlocksRemoved = 0;
   const rawNodeCountBefore = $("script,style,noscript,iframe,nav,aside,footer,.comment,.ads,.widget,.share").length;
-  const selected = extractBySelectors($, SELECTOR_MAP[platform]);
+  const selected = extractBySelectors($, SELECTOR_MAP[platform]) ?? extractByGlobalFallback($);
   if (!selected) {
     return null;
   }

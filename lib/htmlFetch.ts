@@ -4,6 +4,39 @@ export interface FetchHtmlOptions {
   retries?: number;
 }
 
+function detectCharsetFromText(text: string): string | null {
+  const metaCharset = text.match(/<meta[^>]*charset=["']?\s*([a-zA-Z0-9_-]+)/i)?.[1];
+  if (metaCharset) return metaCharset.toLowerCase();
+  const metaContentType = text.match(
+    /<meta[^>]*http-equiv=["']content-type["'][^>]*content=["'][^"']*charset=([a-zA-Z0-9_-]+)/i,
+  )?.[1];
+  if (metaContentType) return metaContentType.toLowerCase();
+  return null;
+}
+
+function decodeHtmlBuffer(
+  buffer: Uint8Array,
+  response: Pick<Response, "headers"> | { headers?: { get?: (name: string) => string | null } },
+): string {
+  const contentType =
+    typeof response?.headers?.get === "function" ? response.headers.get("content-type") ?? "" : "";
+  const headerCharset = contentType.match(/charset=([a-zA-Z0-9_-]+)/i)?.[1]?.toLowerCase() ?? null;
+
+  const utf8Text = new TextDecoder("utf-8").decode(buffer);
+  const metaCharset = detectCharsetFromText(utf8Text);
+  const charset = metaCharset ?? headerCharset ?? "utf-8";
+
+  if (charset === "euc-kr" || charset === "ks_c_5601-1987" || charset === "cp949") {
+    try {
+      return new TextDecoder("euc-kr").decode(buffer);
+    } catch {
+      return utf8Text;
+    }
+  }
+
+  return utf8Text;
+}
+
 export async function fetchHtml(
   url: string,
   options: FetchHtmlOptions = {},
@@ -32,11 +65,18 @@ export async function fetchHtml(
         throw new Error(`HTTP_${response.status}`);
       }
 
-      const html = await response.text();
+      let raw: Uint8Array;
+      if (typeof response.arrayBuffer === "function") {
+        raw = new Uint8Array(await response.arrayBuffer());
+      } else {
+        const textFallback = await response.text();
+        raw = new TextEncoder().encode(textFallback);
+      }
+      const html = decodeHtmlBuffer(raw, response);
       if (!html || html.trim().length === 0) {
         throw new Error("EMPTY_HTML");
       }
-      if (Buffer.byteLength(html, "utf8") > maxBytes) {
+      if (raw.byteLength > maxBytes) {
         throw new Error("MAX_BYTES_EXCEEDED");
       }
 

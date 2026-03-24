@@ -5,8 +5,13 @@ import { writeLog } from "@/lib/logger";
 import { getOpsSnapshot, recordAnalyzeResult } from "@/lib/opsMonitor";
 import { evaluateRateLimit } from "@/lib/rateLimit";
 import { analyzeRequest } from "@/lib/analyzeService";
+import { finishAnalyzeProgress, startAnalyzeProgress, updateAnalyzeProgress } from "@/lib/analyzeProgress";
 
 export async function POST(req: Request) {
+  const progressId = req.headers.get("x-progress-id");
+  if (progressId) {
+    startAnalyzeProgress(progressId);
+  }
   const ip = req.headers.get("x-forwarded-for") ?? "local";
   const requestId = crypto.randomUUID();
   const host = (() => {
@@ -20,6 +25,9 @@ export async function POST(req: Request) {
   const key = `analyze:${ip}`;
   const limit = evaluateRateLimit(key);
   if (!limit.allowed) {
+    if (progressId) {
+      finishAnalyzeProgress(progressId, "error");
+    }
     const timestamp = new Date().toISOString();
     writeLog({
       timestamp,
@@ -59,7 +67,13 @@ export async function POST(req: Request) {
     body = null;
   }
   try {
-    const result = await analyzeRequest(body);
+    const result = await analyzeRequest(body, {
+      onProgress: (stage) => {
+        if (progressId) {
+          updateAnalyzeProgress(progressId, stage);
+        }
+      },
+    });
     const platform = body?.platform ?? "unknown";
     recordAnalyzeResult({
       platform,
@@ -68,6 +82,9 @@ export async function POST(req: Request) {
       noiseBlocksRemoved: result.response.data?.parsed.parserMeta.noiseBlocksRemoved,
     });
     if (result.response.error) {
+      if (progressId) {
+        finishAnalyzeProgress(progressId, "error");
+      }
       writeLog({
         timestamp: new Date().toISOString(),
         level: "warn",
@@ -77,6 +94,9 @@ export async function POST(req: Request) {
         requestId: result.response.requestId,
       });
     }
+    if (progressId) {
+      finishAnalyzeProgress(progressId, "done");
+    }
     return NextResponse.json(
       {
         ...result.response,
@@ -85,6 +105,9 @@ export async function POST(req: Request) {
       { status: result.status },
     );
   } catch {
+    if (progressId) {
+      finishAnalyzeProgress(progressId, "error");
+    }
     writeLog({
       timestamp: new Date().toISOString(),
       level: "error",
