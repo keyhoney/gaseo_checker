@@ -1,4 +1,5 @@
 import * as cheerio from "cheerio";
+import type { AnyNode } from "domhandler";
 import type { Platform } from "@/lib/types";
 
 interface ParseSelectorResult {
@@ -6,6 +7,10 @@ interface ParseSelectorResult {
   depth: number;
   text: string;
   score: number;
+  paragraphCount: number;
+  headingCount: number;
+  listCount: number;
+  externalLinkCount: number;
 }
 
 export interface ParseResult {
@@ -38,10 +43,12 @@ const SELECTOR_MAP: Record<Platform, string[]> = {
     "div.se-main-container",
     "div#postViewArea",
     "div#postArea",
+    "div.se_component_wrap",
+    "div.se-section",
+    "div[id*='SE']",
+    "div[class*='se-']",
     "div.post_ct",
     "article",
-    "div[id*='post']",
-    "div[id*='content']",
   ],
   tistory: [
     "div.tt_article_useless_p_margin",
@@ -64,44 +71,115 @@ function cleanText(raw: string): string {
   return raw.replace(/\s+/g, " ").trim();
 }
 
+function countPromoKeywords(text: string): number {
+  const keywords = [
+    "이 글이 도움",
+    "추천 글",
+    "다른 글",
+    "인기글",
+    "관련 글",
+    "바로가기",
+    "구독",
+    "이웃추가",
+    "광고",
+    "스폰서",
+    "파트너스",
+    "블로그 글쓰기",
+    "공지 목록",
+    "공지글",
+    "이웃추가",
+    "본문 기타 기능",
+    "URL 복사",
+    "글 목록",
+    "카테고리 글",
+    "공유하기",
+  ];
+  const lower = text.toLowerCase();
+  return keywords.reduce((acc, keyword) => {
+    return acc + (lower.includes(keyword.toLowerCase()) ? 1 : 0);
+  }, 0);
+}
+
+function scoreNode(
+  node: cheerio.Cheerio<AnyNode>,
+  selector: string,
+  depth: number,
+): ParseSelectorResult | null {
+  const cloned = node.clone();
+  cloned
+    .find(
+      "script,style,noscript,iframe,nav,aside,footer,header,.comment,.ads,.widget,.share,.related,.recommend,.promotion,.banner,.subscribe,.sidebar",
+    )
+    .remove();
+
+  const text = cleanText(cloned.text());
+  if (text.length < 30) return null;
+
+  const paragraphCount = cloned.find("p").length;
+  const headingCount = cloned.find("h1,h2,h3").length;
+  const listCount = cloned.find("li").length;
+  const externalLinkCount = cloned.find("a[href^='http://'],a[href^='https://']").length;
+  const promoHits = countPromoKeywords(text);
+  const linkDensity = externalLinkCount / Math.max(1, paragraphCount + headingCount + listCount);
+  const score =
+    text.length +
+    paragraphCount * 60 +
+    headingCount * 45 +
+    listCount * 12 -
+    externalLinkCount * 18 -
+    Math.floor(linkDensity * 70) -
+    promoHits * 110;
+
+  return {
+    selector,
+    depth,
+    text,
+    score,
+    paragraphCount,
+    headingCount,
+    listCount,
+    externalLinkCount,
+  };
+}
+
 function extractBySelectors($: cheerio.CheerioAPI, selectors: string[]): ParseSelectorResult | null {
-  const minTextLength = 30;
   let best: ParseSelectorResult | null = null;
   for (let i = 0; i < selectors.length; i += 1) {
     const selector = selectors[i];
-    const node = $(selector).first().clone();
-    if (node.length === 0) continue;
-
-    const linkCount = node.find("a").length;
-    const blockCount = node.find("p,li,h1,h2,h3").length;
-    node.find("script,style,noscript,iframe,nav,aside,footer,.comment,.ads,.widget,.share").remove();
-    const text = cleanText(node.text());
-    if (text.length < minTextLength) continue;
-    const score = text.length + blockCount * 30 - linkCount * 20;
-    const candidate: ParseSelectorResult = { selector, depth: i + 1, text, score };
-    if (!best || candidate.score > best.score) {
-      best = candidate;
+    const nodes = $(selector).toArray();
+    if (nodes.length === 0) continue;
+    for (const el of nodes) {
+      const candidate = scoreNode($(el), selector, i + 1);
+      if (!candidate) continue;
+      if (!best || candidate.score > best.score) best = candidate;
     }
   }
   return best;
 }
 
 function extractByGlobalFallback($: cheerio.CheerioAPI): ParseSelectorResult | null {
-  const candidates = ["article", "main", "div[id*='content']", "div[id*='post']", "section", "body"];
-  const minTextLength = 80;
+  const candidates = [
+    "article",
+    "main",
+    "div[id*='content']",
+    "div[class*='content']",
+    "div[id*='post']",
+    "div[class*='post']",
+    "section",
+    "body",
+  ];
   let best: ParseSelectorResult | null = null;
 
-  for (const selector of candidates) {
-    const node = $(selector).first().clone();
-    if (node.length === 0) continue;
-    const beforeLinkCount = node.find("a").length;
-    const beforeBlockCount = node.find("p,li,h1,h2,h3").length;
-    node.find("script,style,noscript,iframe,nav,aside,footer,.comment,.ads,.widget,.share,header").remove();
-    const text = cleanText(node.text());
-    if (text.length < minTextLength) continue;
-    const score = text.length + beforeBlockCount * 30 - beforeLinkCount * 20;
-    const candidate: ParseSelectorResult = { selector: `fallback:${selector}`, depth: 99, text, score };
-    if (!best || candidate.score > best.score) best = candidate;
+  for (let i = 0; i < candidates.length; i += 1) {
+    const selector = candidates[i];
+    const nodes = $(selector).toArray();
+    if (nodes.length === 0) continue;
+    for (const el of nodes) {
+      const base = scoreNode($(el), `fallback:${selector}`, 90 + i);
+      if (!base) continue;
+      const candidate = { ...base, selector: `fallback:${selector}` };
+      if (!best || candidate.score > best.score) best = candidate;
+    }
   }
 
   return best;
